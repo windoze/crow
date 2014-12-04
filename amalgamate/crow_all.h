@@ -682,7 +682,7 @@ namespace crow
 {
     enum class LogLevel
     {
-        DEBUG,
+        DEBUG_,
         INFO,
         WARNING,
         ERROR,
@@ -789,8 +789,8 @@ namespace crow
         if (crow::logger::get_current_log_level() <= crow::LogLevel::INFO) \
             crow::logger("INFO    ", crow::LogLevel::INFO)
 #define CROW_LOG_DEBUG      \
-        if (crow::logger::get_current_log_level() <= crow::LogLevel::DEBUG) \
-            crow::logger("DEBUG   ", crow::LogLevel::DEBUG)
+        if (crow::logger::get_current_log_level() <= crow::LogLevel::DEBUG_) \
+            crow::logger("DEBUG   ", crow::LogLevel::DEBUG_)
 
 
 
@@ -5982,8 +5982,13 @@ namespace crow
 
 namespace crow
 {
+    template <typename Handler, typename ... Middlewares>
+    class Connection;
     struct response
     {
+        template <typename Handler, typename ... Middlewares>
+        friend class crow::Connection;
+
         std::string body;
         json::wvalue json_value;
         int code{200};
@@ -6012,7 +6017,7 @@ namespace crow
         response(std::string body) : body(std::move(body)) {}
         response(json::wvalue&& json_value) : json_value(std::move(json_value)) {}
         response(int code, std::string body) : body(std::move(body)), code(code) {}
-        response(const json::wvalue& json_value) : body(json::dump(json_value))
+        response(const json::wvalue& json_value) : body(json::dump(json_value)) 
         {
             set_header("Content-Type", "application/json");
         }
@@ -6058,7 +6063,7 @@ namespace crow
             if (!completed_)
             {
                 completed_ = true;
-
+                
                 if (complete_request_handler_)
                 {
                     complete_request_handler_();
@@ -6077,9 +6082,10 @@ namespace crow
             return is_alive_helper_ && is_alive_helper_();
         }
 
-        bool completed_{};
-        std::function<void()> complete_request_handler_;
-        std::function<bool()> is_alive_helper_;
+        private:
+            bool completed_{};
+            std::function<void()> complete_request_handler_;
+            std::function<bool()> is_alive_helper_;
     };
 }
 

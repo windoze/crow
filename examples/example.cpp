@@ -86,7 +86,7 @@ int main()
     });    
 
     // ignore all log
-    crow::logger::setLogLevel(crow::LogLevel::DEBUG);
+    crow::logger::setLogLevel(crow::LogLevel::DEBUG_);
     //crow::logger::setHandler(std::make_shared<ExampleLogHandler>());
 
     app.port(18080)
