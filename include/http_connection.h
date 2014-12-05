@@ -16,6 +16,7 @@
 #include "settings.h"
 #include "dumb_timer_queue.h"
 #include "middleware_context.h"
+#include <fibio/fiber.hpp>
 
 namespace crow
 {
@@ -105,36 +106,30 @@ namespace crow
 #ifdef CROW_ENABLE_DEBUG
     static int connectionCount;
 #endif
-    template <typename Handler, typename ... Middlewares>
+    template <typename Socket, typename Handler, typename ... Middlewares>
     class Connection
     {
     public:
+        template<typename ...Args>
         Connection(
-            boost::asio::io_service& io_service, 
-            Handler* handler, 
-            const std::string& server_name,
-            std::tuple<Middlewares...>& middlewares
+                   Handler* handler,
+                   const std::string& server_name,
+                   std::tuple<Middlewares...>& middlewares,
+                   Args&&...args
             ) 
-            : socket_(io_service), 
+            : socket_(fibio::asio::get_io_service(), std::forward<Args>(args)...),
             handler_(handler), 
             parser_(this), 
             server_name_(server_name),
-            middlewares_(middlewares)
+            middlewares_(middlewares),
+            deadline_(fibio::asio::get_io_service())
         {
-#ifdef CROW_ENABLE_DEBUG
-            connectionCount ++;
-            CROW_LOG_DEBUG << "Connection open, total " << connectionCount << ", " << this;
-#endif
         }
         
         ~Connection()
         {
             res.complete_request_handler_ = nullptr;
             cancel_deadline_timer();
-#ifdef CROW_ENABLE_DEBUG
-            connectionCount --;
-            CROW_LOG_DEBUG << "Connection closed, total " << connectionCount << ", " << this;
-#endif
         }
 
         tcp::socket& socket()
@@ -164,7 +159,7 @@ namespace crow
 
         void handle()
         {
-            cancel_deadline_timer();
+            //cancel_deadline_timer();
             bool is_invalid_request = false;
             add_keep_alive_ = false;
 
@@ -356,6 +351,7 @@ namespace crow
     private:
         static std::string get_cached_date_str()
         {
+#if 1 // TODO: this still works
             using namespace std::chrono;
             thread_local auto last = steady_clock::now();
             thread_local std::string date_str = DateTime().str();
@@ -366,106 +362,114 @@ namespace crow
                 date_str = DateTime().str();
             }
             return date_str;
+#else
+            return DateTime().str();
+#endif
         }
 
         void do_read()
         {
             //auto self = this->shared_from_this();
             is_reading = true;
-            socket_.async_read_some(boost::asio::buffer(buffer_), 
-                [this](const boost::system::error_code& ec, std::size_t bytes_transferred)
+            boost::system::error_code ec;
+            while(!ec) {
+                std::size_t bytes_transferred=socket_.async_read_some(boost::asio::buffer(buffer_), fibio::asio::yield[ec]);
+                bool error_while_reading = true;
+                if (!ec)
                 {
-                    bool error_while_reading = true;
-                    if (!ec)
+                    bool ret = parser_.feed(buffer_.data(), bytes_transferred);
+                    if (ret && socket_.is_open() && !close_connection_)
                     {
-                        bool ret = parser_.feed(buffer_.data(), bytes_transferred);
-                        if (ret && socket_.is_open() && !close_connection_)
-                        {
-                            error_while_reading = false;
-                        }
+                        error_while_reading = false;
                     }
-
-                    if (error_while_reading)
-                    {
-                        cancel_deadline_timer();
-                        parser_.done();
-                        socket_.close();
-                        is_reading = false;
-                        CROW_LOG_DEBUG << this << " from read(1)";
-                        check_destroy();
-                    }
-                    else if (!need_to_call_after_handlers_)
-                    {
-                        start_deadline();
-                        do_read();
-                    }
-                    else
-                    {
-                        // res will be completed later by user
-                        need_to_start_read_after_complete_ = true;
-                    }
-                });
+                }
+                
+                if (error_while_reading)
+                {
+                    cancel_deadline_timer();
+                    parser_.done();
+                    socket_.close();
+                    is_reading = false;
+                    check_destroy();
+                    break;
+                }
+                else if (!need_to_call_after_handlers_)
+                {
+                    // Restart timer
+                    start_deadline();
+                }
+                else
+                {
+                    // res will be completed later by user
+                    need_to_start_read_after_complete_ = true;
+                    break;
+                }
+            }
         }
 
         void do_write()
         {
             //auto self = this->shared_from_this();
             is_writing = true;
-            boost::asio::async_write(socket_, buffers_, 
-                [&](const boost::system::error_code& ec, std::size_t bytes_transferred)
+            boost::system::error_code ec;
+            boost::asio::async_write(socket_, buffers_, fibio::asio::yield[ec]);
+            is_writing = false;
+            if (!ec)
+            {
+                if (close_connection_)
                 {
-                    is_writing = false;
-                    if (!ec)
-                    {
-                        if (close_connection_)
-                        {
-                            socket_.close();
-                            CROW_LOG_DEBUG << this << " from write(1)";
-                            check_destroy();
-                        }
-                    }
-                    else
-                    {
-                        CROW_LOG_DEBUG << this << " from write(2)";
-                        check_destroy();
-                    }
-                });
+                    socket_.close();
+                    check_destroy();
+                }
+            }
+            else
+            {
+                check_destroy();
+            }
         }
 
         void check_destroy()
         {
-            CROW_LOG_DEBUG << this << " is_reading " << is_reading << " is_writing " << is_writing;
             if (!is_reading && !is_writing)
             {
-                CROW_LOG_DEBUG << this << " delete (idle) ";
                 delete this;
             }
         }
 
         void cancel_deadline_timer()
         {
-            CROW_LOG_DEBUG << this << " timer cancelled: " << timer_cancel_key_.first << ' ' << timer_cancel_key_.second;
-            detail::dumb_timer_queue::get_current_dumb_timer_queue().cancel(timer_cancel_key_);
+            deadline_.cancel();
+            if(watchdog_) {
+                watchdog_->join();
+                watchdog_.reset();
+            }
         }
 
         void start_deadline(int timeout = 5)
         {
-            auto& timer_queue = detail::dumb_timer_queue::get_current_dumb_timer_queue();
-            cancel_deadline_timer();
-            
-            timer_cancel_key_ = timer_queue.add([this]
-            {
-                if (!socket_.is_open())
-                {
-                    return;
-                }
-                socket_.close();
-            });
-            CROW_LOG_DEBUG << this << " timer added: " << timer_cancel_key_.first << ' ' << timer_cancel_key_.second;
+            deadline_.expires_from_now(std::chrono::seconds(timeout));
+            if(!watchdog_) {
+                watchdog_.reset(new fibio::fiber(fibio::fiber::attributes(fibio::fiber::attributes::stick_with_parent),
+                                                 &Connection::watchdog_fiber,
+                                                 this));
+            }
         }
 
     private:
-        tcp::socket socket_;
+        void watchdog_fiber() {
+            boost::system::error_code ignore_ec;
+            while (socket_.is_open()) {
+                deadline_.async_wait(fibio::asio::yield[ignore_ec]);
+                // close the socket if timeout
+                auto dur=deadline_.expires_from_now();
+                std::chrono::seconds s=std::chrono::duration_cast<std::chrono::seconds>(dur);
+                if (s <= std::chrono::seconds(0)) {
+                    socket_.close();
+                }
+            }
+        }
+        
+        Socket socket_;
         Handler* handler_;
 
         boost::array<char, 4096> buffer_;
@@ -482,8 +486,8 @@ namespace crow
         std::string content_length_;
         std::string date_str_;
 
-        //boost::asio::deadline_timer deadline_;
-        detail::dumb_timer_queue::key timer_cancel_key_;
+        boost::asio::basic_waitable_timer<std::chrono::steady_clock> deadline_;
+        std::unique_ptr<fibio::fiber> watchdog_;
 
         bool is_reading{};
         bool is_writing{};

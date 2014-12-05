@@ -6,7 +6,7 @@
 #define CROW_ENABLE_DEBUG
 
 /* #ifdef - enables logging */
-#define CROW_ENABLE_LOGGING
+//#define CROW_ENABLE_LOGGING
 
 /* #define - specifies log level */
 /*

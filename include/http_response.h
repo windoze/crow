@@ -7,13 +7,8 @@
 
 namespace crow
 {
-    template <typename Handler, typename ... Middlewares>
-    class Connection;
     struct response
     {
-        template <typename Handler, typename ... Middlewares>
-        friend class crow::Connection;
-
         std::string body;
         json::wvalue json_value;
         int code{200};
@@ -107,9 +102,8 @@ namespace crow
             return is_alive_helper_ && is_alive_helper_();
         }
 
-        private:
-            bool completed_{};
-            std::function<void()> complete_request_handler_;
-            std::function<bool()> is_alive_helper_;
+        bool completed_{};
+        std::function<void()> complete_request_handler_;
+        std::function<bool()> is_alive_helper_;
     };
 }
